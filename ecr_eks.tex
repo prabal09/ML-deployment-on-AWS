@@ -1,0 +1,889 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{titlesec}
+\usepackage{tcolorbox}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{longtable}
+
+% ---------- Hyperref ----------
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    urlcolor=blue!60!black,
+    citecolor=blue!60!black,
+    pdftitle={Deploying ML Models on AWS ECS and EKS},
+    pdfauthor={Prabal}
+}
+
+% ---------- Listings ----------
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codekw}{RGB}{0,0,180}
+\definecolor{codestr}{RGB}{163,21,21}
+\definecolor{codecom}{RGB}{0,128,0}
+
+\lstdefinestyle{pycode}{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{codekw}\bfseries,
+    stringstyle=\color{codestr},
+    commentstyle=\color{codecom}\itshape,
+    language=Python, breaklines=true, showstringspaces=false,
+    numbers=left, numberstyle=\tiny\color{gray},
+    frame=single, rulecolor=\color{gray!30}, tabsize=2
+}
+\lstdefinestyle{bashcode}{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{codekw}\bfseries,
+    stringstyle=\color{codestr},
+    commentstyle=\color{codecom}\itshape,
+    language=bash, breaklines=true, showstringspaces=false,
+    frame=single, rulecolor=\color{gray!30}, tabsize=2
+}
+\lstdefinelanguage{docker}{
+    keywords={FROM, RUN, CMD, ENTRYPOINT, WORKDIR, COPY, ADD, ENV, ARG, EXPOSE, VOLUME, USER, LABEL, HEALTHCHECK, SHELL},
+    keywordstyle=\color{codekw}\bfseries, sensitive=true,
+    comment=[l]{\#}, morestring=[b]",
+}
+\lstdefinestyle{dockercode}{
+    backgroundcolor=\color{codebg}, basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{codekw}\bfseries, stringstyle=\color{codestr},
+    commentstyle=\color{codecom}\itshape,
+    language=docker, breaklines=true, showstringspaces=false,
+    frame=single, rulecolor=\color{gray!30}, tabsize=2
+}
+\lstdefinelanguage{yaml}{
+    keywords={apiVersion, kind, metadata, spec, name, namespace, replicas, selector, matchLabels, labels, template, containers, image, ports, containerPort, resources, requests, limits, memory, cpu, env, valueFrom, secretKeyRef, configMapKeyRef, livenessProbe, readinessProbe, httpGet, path, port, initialDelaySeconds, periodSeconds, type, clusterIP, targetPort, protocol, ingress, rules, host, http, paths, backend, service, number, strategy, rollingUpdate, maxSurge, maxUnavailable, nodeSelector, tolerations, affinity, serviceAccountName},
+    keywordstyle=\color{codekw}\bfseries, sensitive=true,
+    comment=[l]{\#}, morestring=[b]",
+}
+\lstdefinestyle{yamlcode}{
+    backgroundcolor=\color{codebg}, basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{codekw}\bfseries, stringstyle=\color{codestr},
+    commentstyle=\color{codecom}\itshape,
+    language=yaml, breaklines=true, showstringspaces=false,
+    frame=single, rulecolor=\color{gray!30}, tabsize=2
+}
+\lstdefinelanguage{json}{
+    string=[s]{"}{"}, stringstyle=\color{codestr},
+    comment=[l]{//}, commentstyle=\color{codecom},
+}
+\lstdefinestyle{jsoncode}{
+    backgroundcolor=\color{codebg}, basicstyle=\ttfamily\footnotesize,
+    language=json, breaklines=true, showstringspaces=false,
+    frame=single, rulecolor=\color{gray!30}, tabsize=2
+}
+
+% ---------- Note boxes ----------
+\newtcolorbox{notebox}{
+    colback=blue!5!white, colframe=blue!50!black,
+    title=Note, fonttitle=\bfseries, sharp corners, boxrule=0.5pt
+}
+\newtcolorbox{warnbox}{
+    colback=orange!5!white, colframe=orange!70!black,
+    title=Important, fonttitle=\bfseries, sharp corners, boxrule=0.5pt
+}
+\newtcolorbox{tipbox}{
+    colback=green!5!white, colframe=green!50!black,
+    title=Tip, fonttitle=\bfseries, sharp corners, boxrule=0.5pt
+}
+
+\titleformat{\section}{\Large\bfseries\color{blue!50!black}}{\thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries\color{blue!40!black}}{\thesubsection}{1em}{}
+
+\title{\textbf{Deploying ML Models on AWS ECS and EKS}\\
+\large A Step-by-Step Container Orchestration Guide}
+\author{Prabal}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% =========================================================
+\section{Introduction}
+% =========================================================
+
+When your ML workload outgrows SageMaker's managed abstractions or Lambda's
+size and GPU limitations, AWS offers two container orchestrators for running
+custom inference stacks at scale:
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Amazon ECS} (Elastic Container Service) --- AWS-native
+          orchestrator. Simpler mental model, tight integration with the AWS
+          ecosystem, and lower operational overhead.
+    \item \textbf{Amazon EKS} (Elastic Kubernetes Service) --- managed
+          Kubernetes control plane. More portable, more powerful, and backed by
+          the enormous Kubernetes ecosystem (Helm, Argo, KServe, Kubeflow),
+          at the cost of higher complexity.
+\end{itemize}
+
+Both pull container images from \textbf{Amazon ECR} and can run on two
+underlying compute platforms:
+
+\begin{itemize}[leftmargin=*,nosep]
+    \item \textbf{Fargate} --- serverless containers, no EC2 to manage. No GPU.
+    \item \textbf{EC2} --- you manage the instance fleet; required for GPU,
+          Inferentia, spot, and custom kernels.
+\end{itemize}
+
+\begin{notebox}
+\textbf{When to choose ECS / EKS over SageMaker:}
+\begin{itemize}[leftmargin=*,nosep]
+    \item You need a custom serving stack --- Triton Inference Server,
+          TorchServe, Ray Serve, vLLM, Text Generation Inference.
+    \item You already run Kubernetes for the rest of your platform.
+    \item You want fine-grained control over networking, sidecars, service mesh.
+    \item Cost: EC2 reservations / spot can beat SageMaker list prices.
+    \item You are serving LLMs or diffusion models and need exotic GPU
+          topologies (multi-GPU, tensor parallelism).
+\end{itemize}
+\end{notebox}
+
+% =========================================================
+\section{ECS vs.\ EKS --- Choosing}
+% =========================================================
+
+\begin{longtable}{p{4cm} p{5cm} p{5.5cm}}
+\toprule
+\textbf{Dimension} & \textbf{ECS} & \textbf{EKS} \\
+\midrule
+Control plane cost & Free & \$0.10/hour/cluster ($\sim$\$73/mo) \\
+\addlinespace
+Learning curve & Low & High (Kubernetes) \\
+\addlinespace
+Portability & AWS only & Runs anywhere Kubernetes runs \\
+\addlinespace
+Ecosystem & AWS-centric & Helm, Argo, KServe, Kubeflow, Istio \\
+\addlinespace
+Autoscaling & Service + cluster autoscaling & HPA, VPA, KEDA, Karpenter \\
+\addlinespace
+Best for & Small/medium teams, AWS-only shops & Platform teams, multi-tenant, advanced ML stacks \\
+\bottomrule
+\end{longtable}
+
+\begin{tipbox}
+\textbf{Rule of thumb:} Start with ECS on Fargate. Move to EKS only when you
+hit a specific need Kubernetes uniquely solves --- Helm-based OSS inference
+stacks (KServe, Ray Serve, vLLM), multi-model GPU sharing, or an existing
+platform engineering investment.
+\end{tipbox}
+
+% =========================================================
+\section{Common Prerequisites}
+% =========================================================
+
+\begin{enumerate}[leftmargin=*]
+    \item AWS CLI configured, Docker installed and running.
+    \item A VPC with at least two subnets across different Availability Zones.
+    \item An ECR repository holding your inference image (see
+          \S\ref{sec:image}).
+    \item A trained model artifact (baked in image \emph{or} stored in S3 / EFS /
+          FSx for Lustre).
+    \item IAM permissions to create ECS clusters / EKS clusters, task roles,
+          load balancers, autoscaling policies.
+\end{enumerate}
+
+% =========================================================
+\section{Building the Inference Image}
+\label{sec:image}
+% =========================================================
+
+Unlike Lambda, there is no AWS-provided runtime wrapper --- your container
+simply listens on an HTTP port and responds to health checks. A minimal
+FastAPI + PyTorch image:
+
+\begin{lstlisting}[style=dockercode]
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# System deps (if needed for your model)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app/ ./app/
+COPY model/ ./model/
+
+EXPOSE 8080
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", \
+     "--workers", "1"]
+\end{lstlisting}
+
+\textbf{Minimal FastAPI app (\texttt{app/main.py}):}
+
+\begin{lstlisting}[style=pycode]
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import torch
+
+app = FastAPI()
+MODEL = torch.load("model/model.pt", map_location="cpu")
+MODEL.eval()
+
+class Request(BaseModel):
+    inputs: list
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+@app.post("/predict")
+def predict(req: Request):
+    try:
+        x = torch.tensor(req.inputs, dtype=torch.float32)
+        with torch.inference_mode():
+            y = MODEL(x)
+        return {"predictions": y.tolist()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+\end{lstlisting}
+
+\textbf{Push to ECR} (same steps as Lambda doc):
+
+\begin{lstlisting}[style=bashcode]
+export AWS_REGION=us-east-1
+export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+export REPO=ml-inference
+
+aws ecr create-repository --repository-name $REPO --region $AWS_REGION
+
+aws ecr get-login-password --region $AWS_REGION | \
+  docker login --username AWS \
+  --password-stdin $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+
+docker build --platform linux/amd64 -t $REPO:v1 .
+docker tag  $REPO:v1  $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO:v1
+docker push $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO:v1
+\end{lstlisting}
+
+\begin{tipbox}
+For production-grade model servers, skip DIY FastAPI and use a purpose-built
+server: \textbf{NVIDIA Triton} (multi-framework, dynamic batching, model
+versioning), \textbf{TorchServe}, \textbf{TensorFlow Serving},
+\textbf{vLLM} (LLMs), or \textbf{Text Generation Inference}. They handle batching,
+multi-model hosting, and metrics far better than a handwritten server.
+\end{tipbox}
+
+% =========================================================
+\section{Path A --- Deploy on ECS (Fargate)}
+% =========================================================
+
+ECS models a workload as:
+
+\begin{itemize}[leftmargin=*,nosep]
+    \item \textbf{Task Definition} --- the ``recipe'': image URI, CPU/memory,
+          env vars, ports, logging.
+    \item \textbf{Service} --- long-running controller that keeps N tasks
+          healthy behind a load balancer.
+    \item \textbf{Cluster} --- logical grouping of services and tasks.
+\end{itemize}
+
+% ---------------------------------
+\subsection{Step A1 --- Create the ECS Cluster}
+% ---------------------------------
+
+\begin{lstlisting}[style=bashcode]
+aws ecs create-cluster \
+    --cluster-name ml-cluster \
+    --capacity-providers FARGATE FARGATE_SPOT \
+    --default-capacity-provider-strategy \
+      capacityProvider=FARGATE,weight=1
+\end{lstlisting}
+
+% ---------------------------------
+\subsection{Step A2 --- IAM Roles}
+% ---------------------------------
+
+You need two roles:
+
+\begin{itemize}[leftmargin=*,nosep]
+    \item \textbf{Task Execution Role} --- used by ECS itself to pull from ECR
+          and write logs to CloudWatch. Attach
+          \texttt{AmazonECSTaskExecutionRolePolicy}.
+    \item \textbf{Task Role} --- assumed by the \emph{application} inside the
+          container. Grant it whatever AWS permissions your inference code
+          needs (e.g., \texttt{s3:GetObject} on the model bucket).
+\end{itemize}
+
+% ---------------------------------
+\subsection{Step A3 --- Task Definition}
+% ---------------------------------
+
+\texttt{task-def.json}:
+
+\begin{lstlisting}[style=jsoncode]
+{
+  "family": "ml-inference",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "2048",
+  "memory": "8192",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT:role/ecsTaskExecutionRole",
+  "taskRoleArn":      "arn:aws:iam::ACCOUNT:role/ml-inference-task-role",
+  "containerDefinitions": [{
+    "name": "ml",
+    "image": "ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/ml-inference:v1",
+    "essential": true,
+    "portMappings": [{"containerPort": 8080, "protocol": "tcp"}],
+    "healthCheck": {
+      "command": ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"],
+      "interval": 30, "timeout": 5, "retries": 3, "startPeriod": 30
+    },
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "/ecs/ml-inference",
+        "awslogs-region": "us-east-1",
+        "awslogs-stream-prefix": "ecs"
+      }
+    }
+  }]
+}
+\end{lstlisting}
+
+Register it:
+
+\begin{lstlisting}[style=bashcode]
+aws ecs register-task-definition --cli-input-json file://task-def.json
+\end{lstlisting}
+
+\begin{warnbox}
+Fargate CPU/memory combinations are \emph{not} arbitrary. Valid pairs include
+0.25 vCPU / 0.5--2 GB, 2 vCPU / 4--16 GB, 16 vCPU / 32--120 GB, etc. Check
+the Fargate task sizing table before picking values or the task will fail to
+register.
+\end{warnbox}
+
+% ---------------------------------
+\subsection{Step A4 --- Application Load Balancer}
+% ---------------------------------
+
+Create an internet-facing ALB in your public subnets, then a target group of
+type \texttt{ip} (required for Fargate with \texttt{awsvpc} networking):
+
+\begin{lstlisting}[style=bashcode]
+aws elbv2 create-target-group \
+    --name ml-tg \
+    --protocol HTTP --port 8080 \
+    --vpc-id vpc-XXXXXXXX \
+    --target-type ip \
+    --health-check-path /health \
+    --health-check-interval-seconds 30
+\end{lstlisting}
+
+Attach a listener forwarding :80 (or :443 with an ACM cert) to the target group.
+
+% ---------------------------------
+\subsection{Step A5 --- Create the Service}
+% ---------------------------------
+
+\begin{lstlisting}[style=bashcode]
+aws ecs create-service \
+    --cluster ml-cluster \
+    --service-name ml-inference \
+    --task-definition ml-inference \
+    --desired-count 2 \
+    --launch-type FARGATE \
+    --network-configuration "awsvpcConfiguration={
+        subnets=[subnet-A,subnet-B],
+        securityGroups=[sg-XXXX],
+        assignPublicIp=DISABLED}" \
+    --load-balancers "targetGroupArn=arn:...:targetgroup/ml-tg/...,\
+        containerName=ml,containerPort=8080" \
+    --deployment-configuration \
+        "minimumHealthyPercent=100,maximumPercent=200"
+\end{lstlisting}
+
+ECS will launch two tasks, register them with the ALB, and replace any that
+fail health checks.
+
+% ---------------------------------
+\subsection{Step A6 --- Service Autoscaling}
+% ---------------------------------
+
+Register the service as a scalable target and attach a target-tracking policy:
+
+\begin{lstlisting}[style=bashcode]
+aws application-autoscaling register-scalable-target \
+    --service-namespace ecs \
+    --resource-id service/ml-cluster/ml-inference \
+    --scalable-dimension ecs:service:DesiredCount \
+    --min-capacity 2 --max-capacity 20
+
+aws application-autoscaling put-scaling-policy \
+    --policy-name ml-cpu-scale \
+    --service-namespace ecs \
+    --resource-id service/ml-cluster/ml-inference \
+    --scalable-dimension ecs:service:DesiredCount \
+    --policy-type TargetTrackingScaling \
+    --target-tracking-scaling-policy-configuration file://scale.json
+\end{lstlisting}
+
+Where \texttt{scale.json} targets 60\% CPU utilization with cooldowns.
+
+\begin{tipbox}
+For latency-sensitive services, scale on
+\texttt{ALBRequestCountPerTarget} or a custom CloudWatch metric
+(e.g., queue depth) rather than CPU --- CPU reacts too slowly and often stays
+flat until the service is already saturated.
+\end{tipbox}
+
+% ---------------------------------
+\subsection{Step A7 --- Rolling Updates}
+% ---------------------------------
+
+Push a new image tag, register a new task-definition revision, then:
+
+\begin{lstlisting}[style=bashcode]
+aws ecs update-service \
+    --cluster ml-cluster \
+    --service ml-inference \
+    --task-definition ml-inference:2 \
+    --force-new-deployment
+\end{lstlisting}
+
+With \texttt{minimumHealthyPercent=100, maximumPercent=200}, ECS launches new
+tasks alongside old ones and drains the old ones only after new ones are
+healthy (blue/green style).
+
+For canary / linear / all-at-once with automatic rollback, switch the
+deployment controller to \texttt{CODE\_DEPLOY} and configure CodeDeploy.
+
+% =========================================================
+\section{Path B --- Deploy on EKS}
+% =========================================================
+
+EKS is managed Kubernetes. The ML-relevant objects are:
+
+\begin{itemize}[leftmargin=*,nosep]
+    \item \textbf{Deployment} --- declarative pod template + replica count.
+    \item \textbf{Service} --- stable in-cluster IP / DNS.
+    \item \textbf{Ingress} / \textbf{ALB Ingress} --- external HTTPS entry point.
+    \item \textbf{HPA} --- Horizontal Pod Autoscaler, scales pods.
+    \item \textbf{Karpenter} / \textbf{Cluster Autoscaler} --- scales nodes.
+\end{itemize}
+
+% ---------------------------------
+\subsection{Step B1 --- Create the EKS Cluster}
+% ---------------------------------
+
+The easiest path is \texttt{eksctl}:
+
+\begin{lstlisting}[style=bashcode]
+eksctl create cluster \
+    --name ml-eks \
+    --region us-east-1 \
+    --version 1.29 \
+    --nodegroup-name gpu-nodes \
+    --node-type g5.xlarge \
+    --nodes 2 --nodes-min 1 --nodes-max 10 \
+    --with-oidc \
+    --ssh-access --ssh-public-key my-key
+\end{lstlisting}
+
+For Fargate-only (CPU, no GPU):
+
+\begin{lstlisting}[style=bashcode]
+eksctl create cluster \
+    --name ml-eks \
+    --fargate \
+    --region us-east-1
+\end{lstlisting}
+
+\begin{warnbox}
+The EKS control plane costs \textbf{\$0.10/hour} ($\sim$\$73/month) \emph{per
+cluster}, on top of node costs. Do not spin up clusters casually for dev.
+Share clusters across teams where possible.
+\end{warnbox}
+
+% ---------------------------------
+\subsection{Step B2 --- GPU Support}
+% ---------------------------------
+
+For GPU nodes (e.g., \texttt{g5}, \texttt{p4d}, \texttt{p5}), install the
+NVIDIA device plugin DaemonSet:
+
+\begin{lstlisting}[style=bashcode]
+kubectl apply -f \
+  https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.14.0/nvidia-device-plugin.yml
+\end{lstlisting}
+
+Pods then request GPUs via \texttt{resources.limits["nvidia.com/gpu"]: 1}.
+
+% ---------------------------------
+\subsection{Step B3 --- IAM Roles for Service Accounts (IRSA)}
+% ---------------------------------
+
+IRSA maps a Kubernetes ServiceAccount to an IAM role, so only pods running as
+that SA get those AWS permissions --- the least-privilege pattern on EKS.
+
+\begin{lstlisting}[style=bashcode]
+eksctl create iamserviceaccount \
+    --cluster ml-eks \
+    --name ml-inference-sa \
+    --namespace ml \
+    --attach-policy-arn arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess \
+    --approve
+\end{lstlisting}
+
+% ---------------------------------
+\subsection{Step B4 --- Deployment Manifest}
+% ---------------------------------
+
+\texttt{deployment.yaml}:
+
+\begin{lstlisting}[style=yamlcode]
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-inference
+  namespace: ml
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: ml-inference
+  template:
+    metadata:
+      labels:
+        app: ml-inference
+    spec:
+      serviceAccountName: ml-inference-sa
+      containers:
+      - name: ml
+        image: ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/ml-inference:v1
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            cpu: "1"
+            memory: "4Gi"
+            nvidia.com/gpu: "1"    # remove for CPU-only
+          limits:
+            cpu: "2"
+            memory: "8Gi"
+            nvidia.com/gpu: "1"
+        readinessProbe:
+          httpGet: {path: /health, port: 8080}
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        livenessProbe:
+          httpGet: {path: /health, port: 8080}
+          initialDelaySeconds: 60
+          periodSeconds: 30
+\end{lstlisting}
+
+% ---------------------------------
+\subsection{Step B5 --- Service and Ingress}
+% ---------------------------------
+
+\texttt{service.yaml}:
+
+\begin{lstlisting}[style=yamlcode]
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-inference
+  namespace: ml
+spec:
+  type: ClusterIP
+  selector:
+    app: ml-inference
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+\end{lstlisting}
+
+External exposure via the \textbf{AWS Load Balancer Controller} (install via
+Helm once per cluster), which provisions a real AWS ALB from an Ingress:
+
+\begin{lstlisting}[style=yamlcode]
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ml-inference
+  namespace: ml
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: ml-inference
+            port:
+              number: 80
+\end{lstlisting}
+
+Apply everything:
+
+\begin{lstlisting}[style=bashcode]
+kubectl create namespace ml
+kubectl apply -f deployment.yaml
+kubectl apply -f service.yaml
+kubectl apply -f ingress.yaml
+\end{lstlisting}
+
+% ---------------------------------
+\subsection{Step B6 --- Horizontal Pod Autoscaler}
+% ---------------------------------
+
+\begin{lstlisting}[style=yamlcode]
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ml-inference
+  namespace: ml
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ml-inference
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60
+\end{lstlisting}
+
+For queue-depth-based scaling, custom metrics, or scale-to-zero, install
+\textbf{KEDA} --- it supports SQS, Kafka, Prometheus, CloudWatch, and many
+other external triggers.
+
+% ---------------------------------
+\subsection{Step B7 --- Node Autoscaling}
+% ---------------------------------
+
+Two options:
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Cluster Autoscaler} --- reactive, per-node-group, simple.
+    \item \textbf{Karpenter} --- modern AWS-native autoscaler; picks the
+          cheapest suitable instance type dynamically (great for mixed
+          CPU/GPU fleets and spot). Recommended for new clusters.
+\end{itemize}
+
+% ---------------------------------
+\subsection{Step B8 --- Purpose-Built ML Serving on EKS}
+% ---------------------------------
+
+Rather than writing your own Deployments, many teams deploy pre-built
+inference platforms on EKS:
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{KServe} --- standard CRDs (\texttt{InferenceService}) with
+          canary, autoscaling, explainability, batching. The de-facto model
+          serving layer on Kubernetes.
+    \item \textbf{Ray Serve} --- Python-first, great for composition and
+          multi-model pipelines.
+    \item \textbf{Seldon Core} --- enterprise-grade inference graphs.
+    \item \textbf{NVIDIA Triton} on EKS --- best-in-class GPU utilization,
+          dynamic batching, multi-framework.
+    \item \textbf{vLLM / TGI} --- LLM-specific servers with paged attention
+          and continuous batching.
+\end{itemize}
+
+% =========================================================
+\section{GPU and Accelerator Notes}
+% =========================================================
+
+\begin{longtable}{p{3.5cm} p{5cm} p{6cm}}
+\toprule
+\textbf{Instance} & \textbf{Accelerator} & \textbf{Use case} \\
+\midrule
+\texttt{g4dn.*} & NVIDIA T4 (16 GB) & Low-cost inference, small-to-medium DL \\
+\texttt{g5.*}   & NVIDIA A10G (24 GB) & Mid-sized LLMs ($\leq$13B), SD, CV \\
+\texttt{p4d.*}  & 8$\times$ A100 (40 GB) & Large LLMs, training, tensor parallel \\
+\texttt{p5.*}   & 8$\times$ H100 (80 GB) & Frontier models, long context \\
+\texttt{inf1.*} & AWS Inferentia 1 & Cheapest \$/inference for supported models \\
+\texttt{inf2.*} & AWS Inferentia 2 & Larger models, generative AI \\
+\texttt{trn1.*} & AWS Trainium & Training (occasionally inference) \\
+\bottomrule
+\end{longtable}
+
+\begin{tipbox}
+For steady-state LLM serving, \texttt{inf2} with the Neuron SDK is often
+30--50\% cheaper than equivalent NVIDIA GPUs --- at the cost of a narrower
+model-support matrix and a model-compilation step.
+\end{tipbox}
+
+% =========================================================
+\section{Model Weight Storage Strategies}
+% =========================================================
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Baked in image} --- simplest, deterministic. Image rebuilds
+          on every model update. Good for $\leq$ few GB.
+    \item \textbf{S3 at startup} --- image stays small; cold start downloads
+          weights to local disk. Typical for 5--50 GB models.
+    \item \textbf{EFS mount} --- shared read-only filesystem across pods. Great
+          for multi-model endpoints. Medium throughput.
+    \item \textbf{FSx for Lustre} --- high-throughput parallel filesystem
+          backed by S3. Standard for large-scale GPU inference (LLMs) where
+          you need many GB loaded fast across many pods.
+\end{enumerate}
+
+% =========================================================
+\section{Observability}
+% =========================================================
+
+\paragraph{ECS.} CloudWatch Container Insights (one flag at cluster creation),
+plus standard CloudWatch Logs from the \texttt{awslogs} driver. AWS
+Distro for OpenTelemetry (ADOT) for traces and custom metrics.
+
+\paragraph{EKS.} Install the standard Kubernetes observability stack:
+\begin{itemize}[leftmargin=*,nosep]
+    \item \textbf{Prometheus} (AMP --- Amazon Managed Prometheus) + \textbf{Grafana}
+          (AMG) for metrics.
+    \item \textbf{Fluent Bit} $\rightarrow$ CloudWatch Logs / OpenSearch.
+    \item \textbf{AWS Distro for OpenTelemetry} for traces.
+    \item \textbf{DCGM Exporter} for GPU metrics (utilization, memory,
+          temperature, throttling).
+\end{itemize}
+
+% =========================================================
+\section{Cost Considerations}
+% =========================================================
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Spot instances} --- up to 90\% off on-demand; EKS + Karpenter
+          handles interruption gracefully. Great for batch or stateless
+          inference replicas.
+    \item \textbf{Savings Plans} for steady 24/7 workloads (1-year or 3-year
+          commitment, 30--50\% savings).
+    \item \textbf{Right-size continuously} --- most teams over-provision memory
+          by 2--3$\times$. Use Container Insights or Kubecost to find slack.
+    \item \textbf{Scale to zero} overnight / off-hours via KEDA cron scalers or
+          scheduled ECS service updates.
+    \item \textbf{Share GPUs} via MIG (A100/H100) or NVIDIA Time-Slicing for
+          small models --- up to 7$\times$ density on a single card.
+\end{itemize}
+
+% =========================================================
+\section{Production Best Practices}
+% =========================================================
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{IaC everything} --- Terraform, CDK, Pulumi. Never click-ops
+          a production cluster.
+    \item \textbf{GitOps on EKS} --- Argo CD or Flux for declarative,
+          auditable deployments from a Git repo.
+    \item \textbf{Pod Disruption Budgets} on EKS so voluntary disruptions
+          (node upgrades) don't take down all replicas.
+    \item \textbf{Multi-AZ} --- spread replicas across $\geq$ 2 AZs with
+          topology spread constraints / ECS placement strategies.
+    \item \textbf{Warm replicas always $\geq$ 2} --- avoid single-point-of-failure
+          on rolling updates or AZ failures.
+    \item \textbf{Image scanning} --- enable ECR scan-on-push; block critical
+          CVEs at CI time.
+    \item \textbf{Dynamic batching} --- if using Triton or a custom server,
+          enable micro-batching; doubles or triples throughput on GPU.
+    \item \textbf{Separate training and inference clusters} --- different
+          scaling profiles, security posture, and cost lifecycles.
+\end{enumerate}
+
+% =========================================================
+\section{Troubleshooting Checklist}
+% =========================================================
+
+\begin{longtable}{p{5.5cm} p{9.2cm}}
+\toprule
+\textbf{Symptom} & \textbf{Likely Cause / Fix} \\
+\midrule
+ECS task stuck in \texttt{PENDING} &
+Usually networking: the task cannot pull the image. Check that private
+subnets have a NAT Gateway \emph{or} VPC endpoints for ECR + S3 + CloudWatch
+Logs. \\
+\addlinespace
+\texttt{CannotPullContainerError} &
+Task execution role missing ECR permissions, \emph{or} image is for the wrong
+architecture. Rebuild with \texttt{--platform linux/amd64}. \\
+\addlinespace
+ALB targets unhealthy &
+Health check path returns non-2xx, or pod takes longer than the initial delay
+to start. Increase \texttt{initialDelaySeconds} / health check grace period. \\
+\addlinespace
+EKS pod pending, \texttt{Insufficient nvidia.com/gpu} &
+No GPU nodes available or NVIDIA device plugin not installed. Check Karpenter
+/ autoscaler node provisioning logs. \\
+\addlinespace
+OOMKilled in Kubernetes &
+Memory request/limit too low --- framework lazy-allocates. Set \texttt{limits.memory}
+generously or the kernel will reap the pod. \\
+\addlinespace
+GPU utilization near 0\% &
+Tiny batch sizes; enable dynamic batching in Triton / TGI, or raise client
+concurrency. \\
+\addlinespace
+Image pull is slow on scale-up &
+Large image ($\geq$ 5 GB). Use ECR \emph{pull-through cache} + warm AMIs, or
+mount weights from EFS/FSx and keep the code image small. \\
+\bottomrule
+\end{longtable}
+
+% =========================================================
+\section{Summary}
+% =========================================================
+
+\paragraph{ECS flow:}
+\begin{enumerate}[leftmargin=*,nosep]
+    \item Build and push image to ECR.
+    \item Create ECS cluster.
+    \item Define task execution and task roles.
+    \item Register task definition (image, CPU/memory, ports, logging).
+    \item Create ALB + target group.
+    \item Create ECS Service with desired count, networking, load balancer.
+    \item Attach Application Auto Scaling policy.
+    \item Update via new task-definition revisions.
+\end{enumerate}
+
+\paragraph{EKS flow:}
+\begin{enumerate}[leftmargin=*,nosep]
+    \item Create cluster with \texttt{eksctl} (managed / Fargate / GPU node groups).
+    \item Install AWS Load Balancer Controller, NVIDIA device plugin,
+          Karpenter, metrics-server.
+    \item Build and push image to ECR.
+    \item Define Deployment, Service, Ingress manifests.
+    \item Use IRSA for pod-level AWS permissions.
+    \item Attach HPA (or KEDA) for pod scaling; Karpenter for node scaling.
+    \item Optionally layer on KServe / Triton / Ray Serve for richer ML serving.
+\end{enumerate}
+
+\paragraph{The decision.} Choose \textbf{ECS} for simplicity and AWS-native
+workflows; choose \textbf{EKS} when you need Kubernetes' ecosystem, portability,
+or advanced serving primitives. In both cases, ECR is the image registry,
+Fargate is the no-ops compute option, and EC2 (GPU / Inferentia) is the
+high-performance compute option.
+
+\end{document}

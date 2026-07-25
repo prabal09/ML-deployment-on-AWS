@@ -1,0 +1,659 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{titlesec}
+\usepackage{tcolorbox}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{longtable}
+
+% ---------- Hyperref ----------
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    urlcolor=blue!60!black,
+    citecolor=blue!60!black,
+    pdftitle={Deploying ML Models on AWS SageMaker},
+    pdfauthor={Prabal}
+}
+
+% ---------- Listings (code) ----------
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codekw}{RGB}{0,0,180}
+\definecolor{codestr}{RGB}{163,21,21}
+\definecolor{codecom}{RGB}{0,128,0}
+
+\lstdefinestyle{pycode}{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{codekw}\bfseries,
+    stringstyle=\color{codestr},
+    commentstyle=\color{codecom}\itshape,
+    language=Python,
+    breaklines=true,
+    showstringspaces=false,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    frame=single,
+    rulecolor=\color{gray!30},
+    tabsize=2,
+    captionpos=b
+}
+
+\lstdefinestyle{bashcode}{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{codekw}\bfseries,
+    stringstyle=\color{codestr},
+    commentstyle=\color{codecom}\itshape,
+    language=bash,
+    breaklines=true,
+    showstringspaces=false,
+    frame=single,
+    rulecolor=\color{gray!30},
+    tabsize=2
+}
+
+% ---------- Note boxes ----------
+\newtcolorbox{notebox}{
+    colback=blue!5!white,
+    colframe=blue!50!black,
+    title=Note,
+    fonttitle=\bfseries,
+    sharp corners,
+    boxrule=0.5pt
+}
+
+\newtcolorbox{warnbox}{
+    colback=orange!5!white,
+    colframe=orange!70!black,
+    title=Important,
+    fonttitle=\bfseries,
+    sharp corners,
+    boxrule=0.5pt
+}
+
+\newtcolorbox{tipbox}{
+    colback=green!5!white,
+    colframe=green!50!black,
+    title=Tip,
+    fonttitle=\bfseries,
+    sharp corners,
+    boxrule=0.5pt
+}
+
+% ---------- Titles ----------
+\titleformat{\section}{\Large\bfseries\color{blue!50!black}}{\thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries\color{blue!40!black}}{\thesubsection}{1em}{}
+
+\title{\textbf{Deploying Machine Learning Models on AWS SageMaker}\\
+\large A Step-by-Step Deployment Guide}
+\author{Prabal}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+% =========================================================
+\section{Introduction}
+% =========================================================
+
+Amazon SageMaker is AWS's fully managed machine learning service that covers the
+entire ML lifecycle: data labeling, training, tuning, deployment, and monitoring.
+For deployment specifically, SageMaker abstracts away the heavy lifting of
+provisioning compute, setting up HTTPS endpoints, load balancing, autoscaling,
+and rolling updates, letting teams ship production models with a few API calls.
+
+This document focuses on the \textbf{deployment} phase, assuming a model has
+already been trained (in SageMaker, locally, or elsewhere). It walks through the
+end-to-end flow of exposing that model as a production inference service.
+
+\begin{notebox}
+SageMaker offers four deployment modes:
+\begin{itemize}[leftmargin=*,nosep]
+    \item \textbf{Real-time inference} --- persistent HTTPS endpoint, low latency.
+    \item \textbf{Serverless inference} --- pay-per-request, scales to zero.
+    \item \textbf{Asynchronous inference} --- queued requests, large payloads, long timeouts.
+    \item \textbf{Batch transform} --- offline bulk scoring over S3 datasets.
+\end{itemize}
+The main flow below targets \emph{real-time inference}, which is the most common mode.
+\end{notebox}
+
+% =========================================================
+\section{Core Concepts}
+% =========================================================
+
+Before deploying, understand the three SageMaker primitives that compose an endpoint:
+
+\begin{longtable}{p{3.2cm} p{11.5cm}}
+\toprule
+\textbf{Primitive} & \textbf{Purpose} \\
+\midrule
+\texttt{Model} & A logical object that binds a \emph{model artifact} (weights stored
+in S3 as \texttt{model.tar.gz}) to an \emph{inference container image} (from
+ECR) and an \emph{IAM role}. \\
+\addlinespace
+\texttt{EndpointConfig} & Declares one or more \emph{production variants} --- which
+model(s) to serve, instance type, instance count, autoscaling policy, and traffic
+split. \\
+\addlinespace
+\texttt{Endpoint} & The live, invokable HTTPS resource. Built from an
+\texttt{EndpointConfig}. Updating it performs a safe blue/green rollout. \\
+\bottomrule
+\end{longtable}
+
+\begin{tipbox}
+Keep these three objects separate in your mind: \textbf{what to serve} (Model),
+\textbf{how to serve it} (EndpointConfig), and \textbf{where it is served}
+(Endpoint). Blue/green deployments and A/B traffic splits all happen by creating
+new EndpointConfigs and updating the Endpoint to point at them.
+\end{tipbox}
+
+% =========================================================
+\section{Prerequisites}
+% =========================================================
+
+\begin{enumerate}[leftmargin=*]
+    \item An AWS account with billing enabled.
+    \item AWS CLI installed and configured (\texttt{aws configure}).
+    \item Python 3.9+ with \texttt{boto3} and \texttt{sagemaker} SDK installed:
+    \begin{lstlisting}[style=bashcode]
+pip install boto3 sagemaker
+    \end{lstlisting}
+    \item An IAM execution role for SageMaker with the \texttt{AmazonSageMakerFullAccess}
+          managed policy, plus S3 read access to your model bucket. The role's
+          trust policy must allow \texttt{sagemaker.amazonaws.com} to assume it.
+    \item An S3 bucket in the same region as your intended endpoint.
+    \item A trained model (e.g., a PyTorch \texttt{.pt} file, TensorFlow
+          \texttt{SavedModel}, scikit-learn pickle, or HuggingFace checkpoint).
+\end{enumerate}
+
+\begin{warnbox}
+Region consistency matters. The IAM role, S3 bucket, ECR image, and SageMaker
+endpoint must all be in the \emph{same AWS region}. Cross-region references
+cause opaque permission errors and latency overhead.
+\end{warnbox}
+
+% =========================================================
+\section{Step-by-Step Deployment}
+% =========================================================
+
+% ---------------------------------
+\subsection{Step 1 --- Package the Model Artifact}
+% ---------------------------------
+
+SageMaker expects the model artifact as a gzipped tarball named
+\texttt{model.tar.gz}. The internal layout depends on the framework, but the
+general structure for a PyTorch model is:
+
+\begin{lstlisting}[style=bashcode]
+model/
+  code/
+    inference.py        # entry point (see Step 3)
+    requirements.txt    # extra dependencies (optional)
+  model.pth             # the trained weights
+\end{lstlisting}
+
+Create the tarball:
+
+\begin{lstlisting}[style=bashcode]
+cd model/
+tar -czvf model.tar.gz *
+\end{lstlisting}
+
+\begin{notebox}
+For built-in algorithms (XGBoost, Linear Learner, etc.) SageMaker's own training
+jobs produce a compatible \texttt{model.tar.gz} automatically --- you can skip
+the custom packaging step.
+\end{notebox}
+
+% ---------------------------------
+\subsection{Step 2 --- Upload the Artifact to S3}
+% ---------------------------------
+
+\begin{lstlisting}[style=bashcode]
+aws s3 cp model.tar.gz s3://my-ml-artifacts/models/sentiment-v1/model.tar.gz
+\end{lstlisting}
+
+Note the S3 URI --- it will be referenced when creating the SageMaker Model
+object. Use versioned paths (e.g., \texttt{sentiment-v1}, \texttt{sentiment-v2})
+so rollbacks are trivial.
+
+% ---------------------------------
+\subsection{Step 3 --- Write the Inference Script}
+% ---------------------------------
+
+For custom models, SageMaker's framework containers (PyTorch, TensorFlow,
+HuggingFace, scikit-learn) expose four overridable hooks in \texttt{inference.py}:
+
+\begin{lstlisting}[style=pycode]
+import json
+import os
+import torch
+
+def model_fn(model_dir):
+    """Load and return the model. Called once when the container starts."""
+    model = torch.load(os.path.join(model_dir, "model.pth"),
+                       map_location="cpu")
+    model.eval()
+    return model
+
+def input_fn(request_body, request_content_type):
+    """Parse the incoming request payload."""
+    if request_content_type == "application/json":
+        data = json.loads(request_body)
+        return torch.tensor(data["inputs"], dtype=torch.float32)
+    raise ValueError(f"Unsupported content type: {request_content_type}")
+
+def predict_fn(input_data, model):
+    """Run inference."""
+    with torch.no_grad():
+        return model(input_data)
+
+def output_fn(prediction, response_content_type):
+    """Serialize the prediction."""
+    if response_content_type == "application/json":
+        return json.dumps({"predictions": prediction.tolist()})
+    raise ValueError(f"Unsupported content type: {response_content_type}")
+\end{lstlisting}
+
+\begin{tipbox}
+If any of these four functions are missing, SageMaker uses sensible defaults
+that handle JSON / NumPy payloads. For quick prototypes you can often ship with
+just \texttt{model\_fn}.
+\end{tipbox}
+
+% ---------------------------------
+\subsection{Step 4 --- Choose a Container Image}
+% ---------------------------------
+
+There are three options:
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Built-in SageMaker images} --- Maintained by AWS for PyTorch,
+          TensorFlow, MXNet, scikit-learn, XGBoost, HuggingFace, etc. Resolve
+          the URI via the SDK:
+          \begin{lstlisting}[style=pycode]
+from sagemaker import image_uris
+image_uri = image_uris.retrieve(
+    framework="pytorch",
+    region="us-east-1",
+    version="2.1.0",
+    py_version="py310",
+    image_scope="inference",
+    instance_type="ml.m5.xlarge",
+)
+          \end{lstlisting}
+
+    \item \textbf{Extend a SageMaker image} --- Start \texttt{FROM} an official
+          image and add custom system packages or Python libraries. Push to ECR.
+
+    \item \textbf{Bring Your Own Container (BYOC)} --- Fully custom Docker image
+          that implements the SageMaker inference contract (exposes
+          \texttt{/ping} and \texttt{/invocations} on port 8080). Push to ECR.
+\end{enumerate}
+
+\begin{warnbox}
+If you use BYOC, the container must respond to \texttt{GET /ping} with
+HTTP 200 within the timeout (default 60 s) or the endpoint will fail to come up.
+This is the most common BYOC bug.
+\end{warnbox}
+
+% ---------------------------------
+\subsection{Step 5 --- Create the SageMaker Model}
+% ---------------------------------
+
+Using the high-level SageMaker Python SDK:
+
+\begin{lstlisting}[style=pycode]
+from sagemaker.pytorch import PyTorchModel
+import sagemaker
+
+sess = sagemaker.Session()
+role = "arn:aws:iam::123456789012:role/SageMakerExecutionRole"
+
+model = PyTorchModel(
+    model_data="s3://my-ml-artifacts/models/sentiment-v1/model.tar.gz",
+    role=role,
+    framework_version="2.1.0",
+    py_version="py310",
+    entry_point="inference.py",
+    source_dir="model/code",          # where inference.py lives locally
+    name="sentiment-model-v1",
+    sagemaker_session=sess,
+)
+\end{lstlisting}
+
+Behind the scenes this resolves the container image, uploads
+\texttt{source\_dir} as a secondary artifact, and prepares a Model object ---
+but does not yet create it in the account until \texttt{deploy()} is called.
+
+% ---------------------------------
+\subsection{Step 6 --- Deploy the Endpoint}
+% ---------------------------------
+
+A single call creates the EndpointConfig and Endpoint:
+
+\begin{lstlisting}[style=pycode]
+predictor = model.deploy(
+    initial_instance_count=1,
+    instance_type="ml.m5.xlarge",
+    endpoint_name="sentiment-endpoint",
+)
+\end{lstlisting}
+
+Provisioning typically takes \textbf{5--10 minutes}. The endpoint state
+transitions: \texttt{Creating} $\rightarrow$ \texttt{InService}.
+
+\paragraph{Common instance families:}
+\begin{itemize}[leftmargin=*,nosep]
+    \item \texttt{ml.t2.*, ml.m5.*} --- CPU, general purpose, cheap.
+    \item \texttt{ml.c5.*} --- compute-optimized CPU, good for latency-sensitive
+          classical ML.
+    \item \texttt{ml.g4dn.*, ml.g5.*} --- NVIDIA T4 / A10G GPUs, cost-effective
+          deep learning inference.
+    \item \texttt{ml.p4d.*, ml.p5.*} --- A100 / H100 GPUs, LLMs and large
+          vision models.
+    \item \texttt{ml.inf1.*, ml.inf2.*} --- AWS Inferentia custom silicon,
+          lowest cost-per-inference for supported models.
+\end{itemize}
+
+% ---------------------------------
+\subsection{Step 7 --- Invoke the Endpoint}
+% ---------------------------------
+
+From the SDK:
+
+\begin{lstlisting}[style=pycode]
+result = predictor.predict({"inputs": [[0.1, 0.4, 0.9]]})
+print(result)
+\end{lstlisting}
+
+Or from any language using \texttt{boto3} / AWS SDK:
+
+\begin{lstlisting}[style=pycode]
+import boto3, json
+
+runtime = boto3.client("sagemaker-runtime", region_name="us-east-1")
+resp = runtime.invoke_endpoint(
+    EndpointName="sentiment-endpoint",
+    ContentType="application/json",
+    Body=json.dumps({"inputs": [[0.1, 0.4, 0.9]]}),
+)
+print(json.loads(resp["Body"].read()))
+\end{lstlisting}
+
+\begin{notebox}
+SageMaker endpoints are \emph{private by default} --- they sit behind IAM, not
+the public internet. To expose them externally, put an API Gateway + Lambda (or
+direct API Gateway HTTP integration) in front, terminating auth there.
+\end{notebox}
+
+% ---------------------------------
+\subsection{Step 8 --- Configure Autoscaling}
+% ---------------------------------
+
+Autoscaling is \emph{not} enabled by default. Attach a target-tracking policy
+via Application Auto Scaling:
+
+\begin{lstlisting}[style=pycode]
+import boto3
+
+asg = boto3.client("application-autoscaling")
+resource_id = "endpoint/sentiment-endpoint/variant/AllTraffic"
+
+asg.register_scalable_target(
+    ServiceNamespace="sagemaker",
+    ResourceId=resource_id,
+    ScalableDimension="sagemaker:variant:DesiredInstanceCount",
+    MinCapacity=1,
+    MaxCapacity=8,
+)
+
+asg.put_scaling_policy(
+    PolicyName="sentiment-scale",
+    ServiceNamespace="sagemaker",
+    ResourceId=resource_id,
+    ScalableDimension="sagemaker:variant:DesiredInstanceCount",
+    PolicyType="TargetTrackingScaling",
+    TargetTrackingScalingPolicyConfiguration={
+        "TargetValue": 70.0,
+        "PredefinedMetricSpecification": {
+            "PredefinedMetricType": "SageMakerVariantInvocationsPerInstance"
+        },
+        "ScaleInCooldown": 300,
+        "ScaleOutCooldown": 60,
+    },
+)
+\end{lstlisting}
+
+% ---------------------------------
+\subsection{Step 9 --- Monitor and Log}
+% ---------------------------------
+
+SageMaker emits metrics to CloudWatch automatically:
+
+\begin{itemize}[leftmargin=*,nosep]
+    \item \texttt{Invocations}, \texttt{InvocationsPerInstance}
+    \item \texttt{ModelLatency}, \texttt{OverheadLatency}
+    \item \texttt{Invocation4XXErrors}, \texttt{Invocation5XXErrors}
+    \item \texttt{CPUUtilization}, \texttt{GPUUtilization}, \texttt{MemoryUtilization}
+\end{itemize}
+
+Container \texttt{stdout}/\texttt{stderr} flows to CloudWatch Logs under
+\texttt{/aws/sagemaker/Endpoints/<endpoint-name>}.
+
+For production health, also enable:
+\begin{itemize}[leftmargin=*,nosep]
+    \item \textbf{Model Monitor} --- detects data drift, feature skew, model
+          quality drift, and bias over time.
+    \item \textbf{Clarify} --- explainability and bias reports.
+    \item \textbf{CloudWatch Alarms} --- page on \texttt{ModelLatency} p99 or
+          5XX rate.
+\end{itemize}
+
+% ---------------------------------
+\subsection{Step 10 --- Update, Roll Back, or Delete}
+% ---------------------------------
+
+\paragraph{Rolling update.} To ship a new model version, create a new Model
+and a new EndpointConfig, then update the existing Endpoint:
+
+\begin{lstlisting}[style=pycode]
+sm = boto3.client("sagemaker")
+sm.update_endpoint(
+    EndpointName="sentiment-endpoint",
+    EndpointConfigName="sentiment-config-v2",
+)
+\end{lstlisting}
+
+SageMaker performs a \textbf{blue/green} swap: the new fleet is provisioned,
+health-checked, then traffic is shifted. The old fleet is torn down only after
+the new fleet is healthy.
+
+\paragraph{Delete.} Clean up to stop incurring charges (real-time endpoints
+bill per second regardless of traffic):
+
+\begin{lstlisting}[style=pycode]
+predictor.delete_endpoint()
+predictor.delete_model()
+\end{lstlisting}
+
+\begin{warnbox}
+A running \texttt{ml.g5.xlarge} endpoint costs roughly \$1+/hour even when
+idle. \textbf{Always delete test endpoints} or use Serverless Inference for
+development workloads.
+\end{warnbox}
+
+% =========================================================
+\section{Deployment Variants}
+% =========================================================
+
+% ---------------------------------
+\subsection{Serverless Inference}
+% ---------------------------------
+
+No instance management; pay per invocation and duration. Ideal for spiky or
+low-traffic workloads.
+
+\begin{lstlisting}[style=pycode]
+from sagemaker.serverless import ServerlessInferenceConfig
+
+serverless_config = ServerlessInferenceConfig(
+    memory_size_in_mb=4096,
+    max_concurrency=20,
+)
+predictor = model.deploy(serverless_inference_config=serverless_config)
+\end{lstlisting}
+
+\textbf{Trade-offs:} cold starts (hundreds of ms to seconds), 6 GB memory ceiling,
+no GPU support.
+
+% ---------------------------------
+\subsection{Asynchronous Inference}
+% ---------------------------------
+
+Requests are queued in S3; responses returned via SNS notifications. Suitable
+for large payloads (up to 1 GB) or long-running inferences (up to 1 hour).
+
+\begin{lstlisting}[style=pycode]
+from sagemaker.async_inference import AsyncInferenceConfig
+
+async_config = AsyncInferenceConfig(
+    output_path="s3://my-ml-artifacts/async-outputs/",
+    max_concurrent_invocations_per_instance=4,
+)
+predictor = model.deploy(
+    initial_instance_count=1,
+    instance_type="ml.m5.xlarge",
+    async_inference_config=async_config,
+)
+\end{lstlisting}
+
+% ---------------------------------
+\subsection{Batch Transform}
+% ---------------------------------
+
+One-shot bulk scoring of a dataset in S3, no persistent endpoint:
+
+\begin{lstlisting}[style=pycode]
+transformer = model.transformer(
+    instance_count=2,
+    instance_type="ml.m5.xlarge",
+    output_path="s3://my-ml-artifacts/batch-outputs/",
+)
+transformer.transform(
+    data="s3://my-ml-artifacts/batch-inputs/",
+    content_type="application/json",
+)
+transformer.wait()
+\end{lstlisting}
+
+% ---------------------------------
+\subsection{Multi-Model Endpoints (MME)}
+% ---------------------------------
+
+Host \emph{many} models behind one endpoint, loaded dynamically from S3 on
+demand. Ideal when you have hundreds or thousands of small models (e.g., one
+per customer) with sparse traffic.
+
+% ---------------------------------
+\subsection{Multi-Container Endpoints}
+% ---------------------------------
+
+Host multiple containers behind one endpoint. Invoke a specific container by
+name, or chain them in a serial inference pipeline (e.g., preprocessing
+$\rightarrow$ model $\rightarrow$ postprocessing).
+
+% =========================================================
+\section{Production Best Practices}
+% =========================================================
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Infrastructure as Code} --- Define endpoints in CloudFormation,
+          CDK, or Terraform. Avoid console-driven deployments.
+    \item \textbf{CI/CD} --- Use SageMaker Pipelines or CodePipeline for
+          train $\rightarrow$ evaluate $\rightarrow$ register $\rightarrow$
+          deploy flows. Store approved models in the \emph{Model Registry}.
+    \item \textbf{Blue/Green + Canary} --- Use \texttt{DeploymentConfig} with
+          canary or linear traffic shifting for risk-averse rollouts with
+          automatic CloudWatch-alarm-triggered rollback.
+    \item \textbf{VPC isolation} --- Place endpoints in a VPC with no internet
+          egress when handling sensitive data. Use VPC endpoints for S3 and ECR
+          pulls.
+    \item \textbf{Encryption} --- Enable KMS encryption for model artifacts in
+          S3, endpoint EBS volumes, and inter-node traffic.
+    \item \textbf{Right-sizing} --- Use SageMaker Inference Recommender to
+          benchmark instance types against your latency and throughput SLOs.
+    \item \textbf{Shadow testing} --- Deploy new variants with 0\% traffic and
+          mirror production requests to validate before cutover.
+    \item \textbf{Cost hygiene} --- Tag endpoints with project / environment /
+          owner and review Cost Explorer weekly. Use Savings Plans for steady
+          workloads.
+\end{enumerate}
+
+% =========================================================
+\section{Troubleshooting Checklist}
+% =========================================================
+
+\begin{longtable}{p{5.5cm} p{9.2cm}}
+\toprule
+\textbf{Symptom} & \textbf{Likely Cause / Fix} \\
+\midrule
+Endpoint stuck in \texttt{Creating} then \texttt{Failed} &
+Check CloudWatch logs. Usually \texttt{model\_fn} throws, container \texttt{/ping}
+fails, or \texttt{requirements.txt} install times out. \\
+\addlinespace
+\texttt{AccessDenied} on S3 &
+SageMaker execution role missing \texttt{s3:GetObject} on the artifact bucket. \\
+\addlinespace
+\texttt{ModelError: 413 Payload Too Large} &
+Real-time endpoints cap payloads at 6 MB. Use Async Inference for larger inputs. \\
+\addlinespace
+\texttt{ModelLatency} spikes &
+Enable autoscaling; increase instance size; batch requests; consider GPU or
+Inferentia. \\
+\addlinespace
+Cold start on first invocation &
+Pre-warm by invoking after deploy; use provisioned concurrency on serverless. \\
+\addlinespace
+High cost with low traffic &
+Switch to Serverless Inference or Async Inference; delete idle endpoints. \\
+\bottomrule
+\end{longtable}
+
+% =========================================================
+\section{Summary}
+% =========================================================
+
+The canonical SageMaker real-time deployment flow is:
+
+\begin{enumerate}[leftmargin=*,nosep]
+    \item Package model $\rightarrow$ \texttt{model.tar.gz}.
+    \item Upload to S3.
+    \item Write \texttt{inference.py} (four hooks).
+    \item Pick or build a container image.
+    \item Create a \texttt{Model} (binds artifact + image + role).
+    \item Create an \texttt{EndpointConfig} (instance type, count, scaling).
+    \item Create / update an \texttt{Endpoint}.
+    \item Invoke via \texttt{sagemaker-runtime}.
+    \item Attach autoscaling and CloudWatch alarms.
+    \item Monitor with Model Monitor; iterate with blue/green updates.
+\end{enumerate}
+
+The SDK collapses steps 5--7 into a single \texttt{model.deploy()} call, which
+is why SageMaker feels lightweight in practice despite the rich underlying
+primitives.
+
+\end{document}

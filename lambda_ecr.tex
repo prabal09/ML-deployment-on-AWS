@@ -1,0 +1,743 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{titlesec}
+\usepackage{tcolorbox}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{longtable}
+
+% ---------- Hyperref ----------
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    urlcolor=blue!60!black,
+    citecolor=blue!60!black,
+    pdftitle={Deploying ML Models on AWS Lambda + ECR},
+    pdfauthor={Prabal}
+}
+
+% ---------- Listings ----------
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codekw}{RGB}{0,0,180}
+\definecolor{codestr}{RGB}{163,21,21}
+\definecolor{codecom}{RGB}{0,128,0}
+
+\lstdefinestyle{pycode}{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{codekw}\bfseries,
+    stringstyle=\color{codestr},
+    commentstyle=\color{codecom}\itshape,
+    language=Python,
+    breaklines=true,
+    showstringspaces=false,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    frame=single,
+    rulecolor=\color{gray!30},
+    tabsize=2
+}
+
+\lstdefinestyle{bashcode}{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{codekw}\bfseries,
+    stringstyle=\color{codestr},
+    commentstyle=\color{codecom}\itshape,
+    language=bash,
+    breaklines=true,
+    showstringspaces=false,
+    frame=single,
+    rulecolor=\color{gray!30},
+    tabsize=2
+}
+
+\lstdefinelanguage{docker}{
+    keywords={FROM, RUN, CMD, ENTRYPOINT, WORKDIR, COPY, ADD, ENV, ARG, EXPOSE, VOLUME, USER, LABEL, HEALTHCHECK, SHELL},
+    keywordstyle=\color{codekw}\bfseries,
+    sensitive=true,
+    comment=[l]{\#},
+    morestring=[b]",
+}
+
+\lstdefinestyle{dockercode}{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    keywordstyle=\color{codekw}\bfseries,
+    stringstyle=\color{codestr},
+    commentstyle=\color{codecom}\itshape,
+    language=docker,
+    breaklines=true,
+    showstringspaces=false,
+    frame=single,
+    rulecolor=\color{gray!30},
+    tabsize=2
+}
+
+\lstdefinelanguage{json}{
+    string=[s]{"}{"},
+    stringstyle=\color{codestr},
+    comment=[l]{//},
+    commentstyle=\color{codecom},
+}
+
+\lstdefinestyle{jsoncode}{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    language=json,
+    breaklines=true,
+    showstringspaces=false,
+    frame=single,
+    rulecolor=\color{gray!30},
+    tabsize=2
+}
+
+% ---------- Note boxes ----------
+\newtcolorbox{notebox}{
+    colback=blue!5!white, colframe=blue!50!black,
+    title=Note, fonttitle=\bfseries, sharp corners, boxrule=0.5pt
+}
+\newtcolorbox{warnbox}{
+    colback=orange!5!white, colframe=orange!70!black,
+    title=Important, fonttitle=\bfseries, sharp corners, boxrule=0.5pt
+}
+\newtcolorbox{tipbox}{
+    colback=green!5!white, colframe=green!50!black,
+    title=Tip, fonttitle=\bfseries, sharp corners, boxrule=0.5pt
+}
+
+\titleformat{\section}{\Large\bfseries\color{blue!50!black}}{\thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries\color{blue!40!black}}{\thesubsection}{1em}{}
+
+\title{\textbf{Deploying ML Models on AWS Lambda with ECR}\\
+\large A Step-by-Step Serverless Deployment Guide}
+\author{Prabal}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% =========================================================
+\section{Introduction}
+% =========================================================
+
+AWS Lambda is a serverless compute service that runs code on demand without
+provisioning or managing servers. When combined with Amazon Elastic Container
+Registry (ECR), Lambda can execute \textbf{container images up to 10 GB},
+which is large enough to host many small-to-medium ML models along with their
+inference runtime (PyTorch, ONNX, scikit-learn, HuggingFace Transformers).
+
+This deployment pattern --- often called \emph{``Lambda + ECR''} --- is the
+most cost-effective way to serve ML models that receive \textbf{sporadic or
+unpredictable traffic}. You pay only for the milliseconds during which your
+function is actually executing; idle endpoints cost nothing.
+
+\begin{notebox}
+\textbf{When to prefer Lambda + ECR over SageMaker:}
+\begin{itemize}[leftmargin=*,nosep]
+    \item Model fits in $\leq$ 10 GB image and $\leq$ 10 GB memory.
+    \item Traffic is spiky, infrequent, or unpredictable (hours of idle per day).
+    \item Inference latency tolerance is moderate (cold starts can be seconds).
+    \item No GPU required (Lambda is CPU-only).
+    \item You want tight integration with API Gateway, S3 events, EventBridge,
+          SQS, Step Functions, etc.
+\end{itemize}
+\end{notebox}
+
+% =========================================================
+\section{Architecture Overview}
+% =========================================================
+
+The typical topology:
+
+\begin{center}
+\texttt{Client $\rightarrow$ API Gateway $\rightarrow$ Lambda (container) $\rightarrow$ Response}
+\end{center}
+
+with the container image pulled from ECR at cold start, and model weights
+optionally cached from S3 or baked directly into the image.
+
+\textbf{Key components:}
+\begin{itemize}[leftmargin=*,nosep]
+    \item \textbf{ECR} --- private Docker registry that stores the inference image.
+    \item \textbf{Lambda} --- executes the container on demand; reuses warm
+          containers across invocations.
+    \item \textbf{API Gateway} / \textbf{Function URL} --- HTTPS entry point.
+    \item \textbf{IAM role} --- Lambda execution role granting permission to
+          pull from ECR and read model artifacts from S3 (if externalized).
+    \item \textbf{CloudWatch Logs \& Metrics} --- observability.
+\end{itemize}
+
+% =========================================================
+\section{Lambda Constraints (Read First)}
+% =========================================================
+
+Before committing to this path, confirm your model fits within Lambda's limits:
+
+\begin{longtable}{p{5cm} p{9.5cm}}
+\toprule
+\textbf{Resource} & \textbf{Hard limit} \\
+\midrule
+Container image size & 10 GB (uncompressed, as stored in ECR) \\
+\addlinespace
+Memory & 128 MB -- 10 240 MB (10 GB) \\
+\addlinespace
+vCPU & Scales linearly with memory (6 vCPUs at 10 GB) \\
+\addlinespace
+Execution timeout & 15 minutes (900 s) \\
+\addlinespace
+\texttt{/tmp} scratch space & 512 MB -- 10 GB (configurable) \\
+\addlinespace
+Request / response payload & 6 MB sync, 256 KB async (API Gateway: 10 MB) \\
+\addlinespace
+Concurrent executions & 1 000 per region by default (soft limit) \\
+\addlinespace
+GPU & Not supported \\
+\bottomrule
+\end{longtable}
+
+\begin{warnbox}
+If your model weights + runtime exceed \textbf{10 GB}, or if you need GPU
+inference, Lambda is the wrong tool --- use SageMaker, ECS/Fargate, or EC2
+instead.
+\end{warnbox}
+
+% =========================================================
+\section{Prerequisites}
+% =========================================================
+
+\begin{enumerate}[leftmargin=*]
+    \item AWS account, AWS CLI configured (\texttt{aws configure}).
+    \item Docker installed and running locally.
+    \item Python 3.9+.
+    \item A trained model artifact (e.g., \texttt{model.pkl},
+          \texttt{model.onnx}, \texttt{model.pt}, or a HuggingFace checkpoint
+          folder).
+    \item IAM permissions to create ECR repos, Lambda functions, and IAM roles.
+\end{enumerate}
+
+% =========================================================
+\section{Step-by-Step Deployment}
+% =========================================================
+
+% --------------------------------------------
+\subsection{Step 1 --- Project Layout}
+% --------------------------------------------
+
+A minimal layout:
+
+\begin{lstlisting}[style=bashcode]
+lambda-ml/
+  app.py               # Lambda handler
+  requirements.txt     # Python dependencies
+  model/               # model weights (baked into image)
+    model.pkl
+  Dockerfile
+\end{lstlisting}
+
+% --------------------------------------------
+\subsection{Step 2 --- Write the Lambda Handler}
+% --------------------------------------------
+
+The handler loads the model \emph{once at module scope} so it survives across
+warm invocations. Loading inside \texttt{lambda\_handler} would pay the cost
+on every request.
+
+\begin{lstlisting}[style=pycode]
+import json
+import pickle
+import os
+import numpy as np
+
+# ---- Cold-start initialization (runs once per container) ----
+MODEL_PATH = os.environ.get("MODEL_PATH", "/var/task/model/model.pkl")
+with open(MODEL_PATH, "rb") as f:
+    MODEL = pickle.load(f)
+
+def lambda_handler(event, context):
+    try:
+        # API Gateway proxy integration wraps the payload in "body"
+        body = event.get("body", event)
+        if isinstance(body, str):
+            body = json.loads(body)
+
+        features = np.array(body["inputs"], dtype=np.float32)
+        preds = MODEL.predict(features).tolist()
+
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"predictions": preds}),
+        }
+    except Exception as e:
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)}),
+        }
+\end{lstlisting}
+
+\begin{tipbox}
+The model is loaded at import time so it is cached across invocations on the
+same warm container. AWS keeps warm containers alive for $\sim$5--15 minutes of
+inactivity, and longer under sustained traffic.
+\end{tipbox}
+
+% --------------------------------------------
+\subsection{Step 3 --- Write the Dockerfile}
+% --------------------------------------------
+
+Use the official AWS Lambda Python base image --- it ships the Lambda Runtime
+Interface Client (RIC) pre-installed, so your container already speaks the
+Lambda invocation protocol.
+
+\begin{lstlisting}[style=dockercode]
+# Base image maintained by AWS (Python 3.11)
+FROM public.ecr.aws/lambda/python:3.11
+
+# Install Python dependencies into the Lambda task root
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt \
+    --target "${LAMBDA_TASK_ROOT}"
+
+# Copy code and model weights
+COPY app.py        ${LAMBDA_TASK_ROOT}/
+COPY model/        ${LAMBDA_TASK_ROOT}/model/
+
+# Tell Lambda which function to invoke:  file.function
+CMD ["app.lambda_handler"]
+\end{lstlisting}
+
+\textbf{Example \texttt{requirements.txt}:}
+\begin{lstlisting}[style=bashcode]
+numpy==1.26.4
+scikit-learn==1.4.2
+\end{lstlisting}
+
+\begin{warnbox}
+The base image is \texttt{linux/amd64}. If you are on an Apple Silicon Mac,
+build with \texttt{--platform linux/amd64} or the image will fail to start in
+Lambda with cryptic \texttt{exec format error}.
+\end{warnbox}
+
+% --------------------------------------------
+\subsection{Step 4 --- Create an ECR Repository}
+% --------------------------------------------
+
+\begin{lstlisting}[style=bashcode]
+export AWS_REGION=us-east-1
+export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+export REPO_NAME=lambda-ml-inference
+
+aws ecr create-repository \
+    --repository-name $REPO_NAME \
+    --region $AWS_REGION \
+    --image-scanning-configuration scanOnPush=true
+\end{lstlisting}
+
+% --------------------------------------------
+\subsection{Step 5 --- Build, Tag, Push the Image}
+% --------------------------------------------
+
+\begin{lstlisting}[style=bashcode]
+# 1. Authenticate Docker to ECR
+aws ecr get-login-password --region $AWS_REGION | \
+    docker login --username AWS \
+    --password-stdin $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+
+# 2. Build (force linux/amd64 for Lambda)
+docker build --platform linux/amd64 -t $REPO_NAME:v1 .
+
+# 3. Tag for ECR
+docker tag $REPO_NAME:v1 \
+    $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO_NAME:v1
+
+# 4. Push
+docker push $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO_NAME:v1
+\end{lstlisting}
+
+\begin{tipbox}
+Use immutable, version-tagged images (\texttt{v1}, \texttt{v2}, git SHA) rather
+than \texttt{latest}. Lambda pins the image digest at function creation, so
+overwriting \texttt{latest} does not actually roll out a new version --- and
+worse, makes rollbacks ambiguous.
+\end{tipbox}
+
+% --------------------------------------------
+\subsection{Step 6 --- Create the Lambda Execution Role}
+% --------------------------------------------
+
+\textbf{Trust policy} (\texttt{trust-policy.json}):
+
+\begin{lstlisting}[style=jsoncode]
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {"Service": "lambda.amazonaws.com"},
+    "Action": "sts:AssumeRole"
+  }]
+}
+\end{lstlisting}
+
+Create the role and attach the basic execution policy:
+
+\begin{lstlisting}[style=bashcode]
+aws iam create-role \
+    --role-name lambda-ml-role \
+    --assume-role-policy-document file://trust-policy.json
+
+aws iam attach-role-policy \
+    --role-name lambda-ml-role \
+    --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+\end{lstlisting}
+
+Attach extra permissions if the function needs to read weights from S3:
+
+\begin{lstlisting}[style=bashcode]
+aws iam attach-role-policy \
+    --role-name lambda-ml-role \
+    --policy-arn arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+\end{lstlisting}
+
+% --------------------------------------------
+\subsection{Step 7 --- Create the Lambda Function}
+% --------------------------------------------
+
+\begin{lstlisting}[style=bashcode]
+aws lambda create-function \
+    --function-name ml-inference \
+    --package-type Image \
+    --code ImageUri=$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO_NAME:v1 \
+    --role arn:aws:iam::$ACCOUNT_ID:role/lambda-ml-role \
+    --timeout 60 \
+    --memory-size 3008 \
+    --ephemeral-storage Size=2048 \
+    --architectures x86_64 \
+    --region $AWS_REGION
+\end{lstlisting}
+
+\begin{notebox}
+\textbf{Memory sizing is critical.} Lambda scales vCPU linearly with memory ---
+more memory often makes the function \emph{both faster and cheaper} per
+invocation because billed duration drops. For ML inference, start at
+\textbf{3 008 MB (2 vCPU)} and benchmark up/down from there.
+\end{notebox}
+
+% --------------------------------------------
+\subsection{Step 8 --- Expose via HTTP}
+% --------------------------------------------
+
+Two simple options:
+
+\paragraph{Option A --- Function URL (quickest).}
+
+\begin{lstlisting}[style=bashcode]
+aws lambda create-function-url-config \
+    --function-name ml-inference \
+    --auth-type NONE    # or AWS_IAM for signed requests
+
+aws lambda add-permission \
+    --function-name ml-inference \
+    --statement-id FunctionURLAllowPublicAccess \
+    --action lambda:InvokeFunctionUrl \
+    --principal "*" \
+    --function-url-auth-type NONE
+\end{lstlisting}
+
+Returns a URL like:
+\texttt{https://<random>.lambda-url.us-east-1.on.aws/}
+
+\paragraph{Option B --- API Gateway (production-grade).}
+Provides throttling, custom domains, WAF, usage plans, and request/response
+transformation. Attach an HTTP API with a Lambda proxy integration pointing to
+the function ARN.
+
+% --------------------------------------------
+\subsection{Step 9 --- Invoke}
+% --------------------------------------------
+
+\begin{lstlisting}[style=bashcode]
+curl -X POST https://<function-url>/ \
+     -H "Content-Type: application/json" \
+     -d '{"inputs": [[0.1, 0.4, 0.9]]}'
+\end{lstlisting}
+
+Or from Python:
+
+\begin{lstlisting}[style=pycode]
+import boto3, json
+lam = boto3.client("lambda", region_name="us-east-1")
+resp = lam.invoke(
+    FunctionName="ml-inference",
+    Payload=json.dumps({"inputs": [[0.1, 0.4, 0.9]]}),
+)
+print(json.loads(resp["Payload"].read()))
+\end{lstlisting}
+
+% --------------------------------------------
+\subsection{Step 10 --- Update and Roll Back}
+% --------------------------------------------
+
+Push a new tag, then point Lambda at the new digest:
+
+\begin{lstlisting}[style=bashcode]
+docker build --platform linux/amd64 -t $REPO_NAME:v2 .
+docker tag  $REPO_NAME:v2 \
+    $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO_NAME:v2
+docker push $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO_NAME:v2
+
+aws lambda update-function-code \
+    --function-name ml-inference \
+    --image-uri $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO_NAME:v2
+\end{lstlisting}
+
+Use \textbf{versions and aliases} plus \textbf{CodeDeploy} for canary / linear
+rollouts with automatic rollback on CloudWatch alarm.
+
+% =========================================================
+\section{Dealing with Cold Starts}
+% =========================================================
+
+Cold start = the time Lambda spends pulling the image, initializing the
+container, and running module-level code (including model load). For ML images
+this is often \textbf{2--15 seconds}, which can dominate tail latency.
+
+\textbf{Mitigations, in order of impact:}
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Provisioned Concurrency} --- reserves a pool of always-warm
+          containers; eliminates cold starts entirely within that pool.
+          Increases cost (billed hourly for reserved capacity).
+    \item \textbf{SnapStart for Python / containers} --- caches initialized
+          state snapshots; dramatically reduces cold-start for supported
+          runtimes.
+    \item \textbf{Smaller images} --- prune dev dependencies; use slim base
+          images; quantize or compress model weights.
+    \item \textbf{Lazy imports} --- only \texttt{import torch} etc. inside
+          the functions that need them if the handler has multiple code paths.
+    \item \textbf{Right-size memory upward} --- more memory = more CPU = faster
+          init. Counter-intuitively often \emph{cheaper} because duration drops.
+    \item \textbf{Pre-warming pings} --- EventBridge rule hitting the function
+          every few minutes. Cheap and cheerful but not guaranteed.
+\end{enumerate}
+
+\begin{tipbox}
+For customer-facing synchronous APIs on spiky traffic, \textbf{Provisioned
+Concurrency} is usually the right answer. Reserve 1--2 instances; it is
+inexpensive compared to a SageMaker endpoint running 24/7.
+\end{tipbox}
+
+% =========================================================
+\section{Externalizing Model Weights}
+% =========================================================
+
+Baking weights into the image is simplest but rebuilds on every model update.
+For faster iteration or for models that approach the 10 GB image limit, store
+weights in S3 and fetch them at cold start into \texttt{/tmp}:
+
+\begin{lstlisting}[style=pycode]
+import os, boto3, pickle
+
+BUCKET = os.environ["MODEL_BUCKET"]
+KEY    = os.environ["MODEL_KEY"]
+LOCAL  = "/tmp/model.pkl"
+
+if not os.path.exists(LOCAL):
+    boto3.client("s3").download_file(BUCKET, KEY, LOCAL)
+
+with open(LOCAL, "rb") as f:
+    MODEL = pickle.load(f)
+\end{lstlisting}
+
+\begin{notebox}
+\texttt{/tmp} persists across warm invocations but \emph{not} across cold
+starts. Each new container will re-download. For multi-GB weights, this can
+add seconds to cold start --- weigh the tradeoff against image-based loading.
+For shared model storage across many Lambda containers, consider mounting
+Amazon EFS.
+\end{notebox}
+
+% =========================================================
+\section{Framework-Specific Notes}
+% =========================================================
+
+\subsection{PyTorch}
+\begin{itemize}[leftmargin=*,nosep]
+    \item Install the \emph{CPU-only} wheel: \texttt{torch --index-url
+          https://download.pytorch.org/whl/cpu} --- avoids CUDA bloat and
+          keeps the image under the 10 GB limit.
+    \item Call \texttt{model.eval()} and wrap inference in
+          \texttt{torch.inference\_mode()}.
+    \item Consider exporting to TorchScript or ONNX for faster load and
+          inference.
+\end{itemize}
+
+\subsection{HuggingFace Transformers}
+\begin{itemize}[leftmargin=*,nosep]
+    \item Set \texttt{TRANSFORMERS\_CACHE=/tmp} to avoid writes into the
+          read-only image layer.
+    \item Pre-download weights at build time with a \texttt{RUN python -c
+          "..."} step rather than fetching from the Hub at cold start.
+    \item For large models (7B+) prefer quantized GGUF / int4 variants or
+          skip Lambda entirely.
+\end{itemize}
+
+\subsection{ONNX Runtime}
+\begin{itemize}[leftmargin=*,nosep]
+    \item Excellent fit: small runtime, fast CPU inference, low cold start.
+    \item Use \texttt{onnxruntime} (not \texttt{onnxruntime-gpu}) for Lambda.
+\end{itemize}
+
+\subsection{scikit-learn / XGBoost / LightGBM}
+\begin{itemize}[leftmargin=*,nosep]
+    \item Near-ideal fit --- small dependencies, fast cold start, cheap.
+    \item Pickle version pinning matters: load with the same library version
+          that pickled the model.
+\end{itemize}
+
+% =========================================================
+\section{Observability}
+% =========================================================
+
+\begin{itemize}[leftmargin=*]
+    \item \textbf{CloudWatch Logs} --- all \texttt{stdout}/\texttt{stderr}
+          lands in \texttt{/aws/lambda/<function-name>}. Use structured JSON
+          logs for easy querying with CloudWatch Logs Insights.
+    \item \textbf{CloudWatch Metrics} --- \texttt{Invocations}, \texttt{Errors},
+          \texttt{Throttles}, \texttt{Duration}, \texttt{ConcurrentExecutions},
+          \texttt{IteratorAge} (streams).
+    \item \textbf{AWS X-Ray} --- enable active tracing for per-segment latency
+          breakdown (init vs. invoke vs. downstream calls).
+    \item \textbf{Lambda Insights} --- enhanced metrics (CPU, memory,
+          network, disk) via a bundled extension layer.
+\end{itemize}
+
+% =========================================================
+\section{Cost Model}
+% =========================================================
+
+Lambda pricing has two components per invocation:
+
+\begin{enumerate}[leftmargin=*,nosep]
+    \item \textbf{Requests} --- \$0.20 per 1 M requests.
+    \item \textbf{Duration} --- billed per ms, proportional to memory
+          allocated (GB-seconds).
+\end{enumerate}
+
+\paragraph{Back-of-envelope example.} A function at 3 008 MB averaging 500 ms
+per invocation, 1 M invocations per month:
+\[
+\text{Duration cost} \approx 1{,}000{,}000 \times 0.5\,\text{s}
+\times \frac{3008}{1024}\,\text{GB} \times \$0.0000166667/\text{GB-s}
+\approx \$24.50
+\]
+plus \$0.20 requests = $\sim$\$24.70/month. Compared to a \texttt{ml.m5.xlarge}
+SageMaker endpoint at $\sim$\$140/month running 24/7, this is $\sim$6$\times$
+cheaper for the same invocation count --- but SageMaker wins once traffic is
+high enough to keep the endpoint continuously busy.
+
+\begin{tipbox}
+The crossover point where SageMaker becomes cheaper is typically around
+\textbf{5--10 million invocations per month} for CPU workloads. Below that,
+Lambda wins; above that, a right-sized persistent endpoint wins.
+\end{tipbox}
+
+% =========================================================
+\section{Production Best Practices}
+% =========================================================
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Infrastructure as Code} --- Define everything (ECR repo,
+          Lambda, IAM role, API Gateway) in AWS SAM, CDK, or Terraform.
+    \item \textbf{CI/CD} --- GitHub Actions / CodePipeline: build image
+          $\rightarrow$ push to ECR $\rightarrow$ update function $\rightarrow$
+          shift alias with CodeDeploy canary.
+    \item \textbf{Versions \& aliases} --- Publish immutable versions; point
+          \texttt{prod} and \texttt{staging} aliases at specific versions for
+          safe rollouts.
+    \item \textbf{Idempotency} --- For async / SQS-triggered inference,
+          de-duplicate on a request ID; Lambda may retry on failure.
+    \item \textbf{Reserved / Provisioned Concurrency} --- Protect critical
+          functions from noisy-neighbor throttling; eliminate cold starts.
+    \item \textbf{VPC only when needed} --- VPC-attached Lambdas add ENI
+          cold-start overhead. Attach only if you must reach RDS / ElastiCache
+          / private subnets. Use VPC endpoints to avoid NAT Gateway charges.
+    \item \textbf{Secrets} --- Use Secrets Manager or SSM Parameter Store, not
+          environment variables, for sensitive values.
+    \item \textbf{Image hygiene} --- Multi-stage builds; strip tests and docs;
+          \texttt{pip install --no-cache-dir}; remove \texttt{\_\_pycache\_\_}.
+          Target $<$ 2 GB images when possible.
+\end{enumerate}
+
+% =========================================================
+\section{Troubleshooting Checklist}
+% =========================================================
+
+\begin{longtable}{p{5.5cm} p{9.2cm}}
+\toprule
+\textbf{Symptom} & \textbf{Likely Cause / Fix} \\
+\midrule
+\texttt{exec format error} at cold start &
+Image built for wrong architecture. Rebuild with
+\texttt{--platform linux/amd64}. \\
+\addlinespace
+\texttt{Runtime.InvalidEntrypoint} &
+\texttt{CMD} in Dockerfile does not match handler.
+Must be \texttt{["file.function"]} (no \texttt{.py}). \\
+\addlinespace
+Cold start $>$ 10 s &
+Image too large / model too large. Increase memory, use Provisioned
+Concurrency, externalize weights to EFS, or switch to SageMaker. \\
+\addlinespace
+\texttt{Task timed out after 3.00 seconds} &
+Default timeout is 3 s. Raise with \texttt{--timeout} (max 900). \\
+\addlinespace
+\texttt{[Errno 28] No space left on device} &
+Writing to \texttt{/tmp} which defaults to 512 MB. Increase ephemeral
+storage or write elsewhere. \\
+\addlinespace
+\texttt{AccessDeniedException} pulling image &
+Lambda execution role needs ECR permissions, \emph{or} the ECR repo
+policy must allow the Lambda service principal. \\
+\addlinespace
+Memory climbs invocation-over-invocation &
+Module-level state accumulating. Clear caches in the handler or
+recycle containers by bumping a no-op env var. \\
+\bottomrule
+\end{longtable}
+
+% =========================================================
+\section{Summary}
+% =========================================================
+
+The canonical Lambda + ECR deployment flow is:
+
+\begin{enumerate}[leftmargin=*,nosep]
+    \item Write handler with module-level model load.
+    \item Write Dockerfile using \texttt{public.ecr.aws/lambda/python}.
+    \item Create ECR repository.
+    \item Build (\texttt{--platform linux/amd64}), tag, push.
+    \item Create IAM execution role.
+    \item Create Lambda function with \texttt{--package-type Image}.
+    \item Expose via Function URL or API Gateway.
+    \item Tune memory, timeout, ephemeral storage.
+    \item Attach Provisioned Concurrency for latency-sensitive paths.
+    \item Monitor with CloudWatch, X-Ray, Lambda Insights.
+\end{enumerate}
+
+Lambda + ECR is the right answer when your traffic is spiky, your model is
+small-to-medium, and you want to pay nothing when idle --- which describes a
+surprising fraction of real-world ML workloads.
+
+\end{document}
