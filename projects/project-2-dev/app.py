@@ -6,37 +6,37 @@ import pickle
 import numpy as np
 
 # Load pickled model
-try:
-    with open("model.pkl", "rb") as f:
-        model = pickle.load(f)
-except FileNotFoundError:
-    print("Error: model.pkl file not found. Please ensure the model file is present in the correct directory.")
-    raise FileNotFoundError(
-        f"'{MODEL_PATH}' not found. Run train.py first to generate the model artifact."
-    )
+MODEL_PATH = "model.pkl"
+
+with open(MODEL_PATH, "rb") as f:
+    model = pickle.load(f)
+
     
 
 CLASS_MAP = {0: "setosa", 1: "versicolor", 2: "virginica"}
 
-@app.route('/predict', methods=['GET'])
+@app.route("/predict", methods=["POST"])
 def predict():
-    # Predict on new sample: [sepal length, sepal width, petal length, petal width]
-    # sample input : np.array([[5.1, 3.5, 1.4, 0.2]])
-    # returns the predicted class index (0, 1, or 2)
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "Missing or invalid JSON body"})
-    sample = np.array([data["features"]])
+    data = request.get_json(silent=True)
+    if not data or "features" not in data:
+        return jsonify({"error": "Body must be JSON with a 'features' key"}), 400
 
-    prediction = model.predict(sample)
+    features = data["features"]
+    if not isinstance(features, list) or len(features) != 4:
+        return jsonify({"error": "'features' must be a list of 4 numbers"}), 400
 
-    
-    class_idx = int(prediction[0])  # Convert NumPy int to Python int
-    class_name: CLASS_MAP.get(pred_idx, "unknown")
-    print(f"Predicted class index: {class_idx}, class name: {class_name}")
+    try:
+        sample = np.array([features], dtype=float)
+        class_idx = int(model.predict(sample)[0])
+    except Exception as e:
+        app.logger.exception("Prediction failed")
+        return jsonify({"error": "Prediction failed", "detail": str(e)}), 500
 
-    return jsonify({"prediction": class_idx,
-                    "class_name": class_name})
+    return jsonify({
+        "prediction": class_idx,
+        "class_name": CLASS_MAP.get(class_idx, "unknown"),
+    }), 200
+
 
 if __name__ == '__main__':
     app.run(debug=True)
