@@ -1,12 +1,12 @@
 [Unit]
-Description=Gunicorn WSGI server for Iris ML API
+Description=Gunicorn WSGI server for iris-scaled
 After=network.target
 
 [Service]
 User=ubuntu
 Group=ubuntu
-WorkingDirectory=/home/ubuntu/ML-deployment-on-AWS/projects/project-2-dev
-ExecStart=/home/ubuntu/ML-deployment-on-AWS/projects/project-2-dev/venv/bin/gunicorn app:app -c gunicorn.conf.py
+WorkingDirectory=/home/ubuntu/ML-deployment-on-AWS/projects/project-2.5-asg-alb
+ExecStart=/home/ubuntu/ML-deployment-on-AWS/projects/project-2.5-asg-alb/venv/bin/gunicorn app:app -c gunicorn.conf.py
 Restart=always
 RestartSec=3
 
