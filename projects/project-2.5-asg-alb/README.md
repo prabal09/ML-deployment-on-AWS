@@ -5,7 +5,7 @@ self-healing, self-scaling fleet behind a load balancer. Same Iris classifier,
 same Flask + Gunicorn + nginx stack — but now reproducible from zero and
 horizontally scalable.
 
-**Status:** not started — begins after Project 2 reaches Phase G (HTTPS working)
+**Status:** ready to start — Project 2 complete (2026-09-13); single-instance HTTPS endpoint live at `https://iris.ml-prabal.com/predict`
 
 ## Goal
 
@@ -13,7 +13,7 @@ Replace the "pet" server from Project 2 with "cattle": a fleet of identical
 EC2 instances that the Auto Scaling Group keeps alive and resizes on demand,
 fronted by an Application Load Balancer that terminates TLS and spreads traffic.
 No instance is special — any one can die and be replaced with no downtime,
-and the endpoint stays reachable at `https://iris.<my-domain>/predict`.
+and the endpoint stays reachable at `https://iris.ml-prabal.com/predict`.
 
 The point of this project is to learn what "highly available" and "scalable"
 actually cost to build by hand, before Projects 5–6 (ECS/EKS) hide it again.
@@ -107,8 +107,8 @@ an AMI:
 
 - `deploy/user-data.sh` — first-boot bootstrap: installs deps, pulls code,
   installs the systemd/nginx files, starts the service
-- `deploy/myapp.service` — systemd unit (copied from Project 2)
-- `deploy/nginx.conf` — nginx site config, HTTP-only now (copied from Project 2)
+- `deploy/iris-api.service` — systemd unit (copied from Project 2)
+- `deploy/nginx.conf` — nginx site config, HTTP-only now (copied from Project 2; certbot lines dropped since TLS moves to ALB)
 - `launch-template.json` — Launch Template definition (for CLI reproducibility)
 - `asg-config.json` — ASG settings (min/max/desired, health check config)
 - `NOTES.md` — console click-paths and gotchas as I go
