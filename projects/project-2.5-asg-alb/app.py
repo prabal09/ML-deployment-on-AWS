@@ -5,6 +5,8 @@ app = Flask(__name__)
 import pickle
 import numpy as np
 
+APP_VERSION = "v2"   # Change this value to see the version flip during refresh
+
 # Load pickled model
 MODEL_PATH = "model.pkl"
 
@@ -40,6 +42,11 @@ def predict():
 @app.route("/health", methods=["GET"])
 def health_check():
     return jsonify({"status": "healthy"}), 200
+
+
+@app.route("/version", methods=["GET"])
+def version():
+    return jsonify({"version": APP_VERSION}), 200
 
 if __name__ == '__main__':
     app.run(debug=True)
