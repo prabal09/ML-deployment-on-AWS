@@ -5,7 +5,7 @@ app = Flask(__name__)
 import pickle
 import numpy as np
 
-APP_VERSION = "v3"   # Change this value to see the version flip during refresh
+APP_VERSION = "v2"   # Change this value to see the version flip during refresh
 
 # Load pickled model
 MODEL_PATH = "model.pkl"
