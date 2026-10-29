@@ -5,3 +5,4 @@ venv/
 *.pem
 .DS_Store
 projects/*/model.pkl
+projects\project-3-sagemaker\model.tar.gz

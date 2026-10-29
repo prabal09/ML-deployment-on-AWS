@@ -38,11 +38,20 @@ def main():
 
     session = sagemaker.Session()
 
-    # The pre-packaged model.tar.gz already contains code/inference.py — the
-    # sklearn container will find it automatically. No entry_point needed.
+    # The SageMaker sklearn container requires SAGEMAKER_PROGRAM env var to
+    # know which module file contains the handler functions. That env var is
+    # set by the SDK when entry_point= is specified. Without it, the container
+    # tries to import an empty module name and fails the ping health check.
+    #
+    # source_dir="." tells the SDK to upload inference.py from the current
+    # working directory to an SDK-managed S3 location, which the container
+    # then downloads at startup (overriding anything in model.tar.gz's
+    # code/ folder — but model.tar.gz still provides model.pkl).
     model = SKLearnModel(
         model_data=MODEL_S3_URI,
         role=role_arn,
+        entry_point="inference.py",
+        source_dir=".",
         framework_version=FRAMEWORK_VERSION,
         sagemaker_session=session,
     )
