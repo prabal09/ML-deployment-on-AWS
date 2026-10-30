@@ -38,20 +38,19 @@ def main():
 
     session = sagemaker.Session()
 
-    # The SageMaker sklearn container requires SAGEMAKER_PROGRAM env var to
-    # know which module file contains the handler functions. That env var is
-    # set by the SDK when entry_point= is specified. Without it, the container
-    # tries to import an empty module name and fails the ping health check.
+    # entry_point tells the SDK which module the container should import
+    # (sets SAGEMAKER_PROGRAM env var).
     #
-    # source_dir="." tells the SDK to upload inference.py from the current
-    # working directory to an SDK-managed S3 location, which the container
-    # then downloads at startup (overriding anything in model.tar.gz's
-    # code/ folder — but model.tar.gz still provides model.pkl).
+    # NO source_dir — if we specified one, the SDK would upload the entire
+    # directory (including requirements.txt), and the container would try to
+    # pip install everything in it. Our requirements.txt is tuned for the
+    # local Python 3.12 client; the container runs Python 3.9 and only needs
+    # inference.py's imports (numpy, pickle, json, os) which it already has.
+    # Omitting source_dir makes the SDK upload only inference.py.
     model = SKLearnModel(
         model_data=MODEL_S3_URI,
         role=role_arn,
         entry_point="inference.py",
-        source_dir=".",
         framework_version=FRAMEWORK_VERSION,
         sagemaker_session=session,
     )
