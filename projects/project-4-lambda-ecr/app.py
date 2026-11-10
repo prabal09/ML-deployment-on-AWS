@@ -16,6 +16,7 @@ from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
+from mangum import Mangum
 from pydantic import BaseModel, Field
 
 
@@ -77,3 +78,14 @@ def predict(request: PredictionRequest) -> PredictionResponse:
         prediction=class_idx,
         class_name=CLASS_MAP.get(class_idx, "unknown"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Lambda handler — wraps the FastAPI ASGI app so AWS Lambda can invoke it.
+#
+# Local dev (uvicorn): ignores this entirely; serves `app` directly via ASGI.
+# Lambda runtime: invokes `handler(event, context)` per request. Mangum
+#   translates the Lambda event → ASGI scope, calls FastAPI, translates the
+#   ASGI response → Lambda-shaped dict.
+# ---------------------------------------------------------------------------
+handler = Mangum(app)
