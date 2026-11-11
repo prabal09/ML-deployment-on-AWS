@@ -1,23 +1,25 @@
 # Project 3 — SageMaker Managed Inference
 
-Deploying the same scikit-learn Iris classifier via Amazon SageMaker's three
-inference modes — real-time endpoint, serverless inference, and batch
-transform. First encounter with AWS's managed ML platform; a deliberate
-contrast to the hand-built stacks of Projects 2 and 2.5.
+Deploying the same scikit-learn Iris classifier via Amazon SageMaker's four
+inference modes — real-time endpoint, serverless inference, asynchronous
+inference, and batch transform. First encounter with AWS's managed ML platform;
+a deliberate contrast to the hand-built stacks of Projects 2 and 2.5.
 
-**Status:** not started — begins after Project 2.5 teardown complete
+**Status:** in progress — all four modes implemented locally (scripts for
+deploy / invoke / teardown + `inference.py` + packaged `model.tar.gz`). Live
+AWS run / cost-comparison still to be confirmed end-to-end.
 
 ## Goal
 
-Take the same `train.py` + `model.pkl` from Project 2.5 and deploy it three
+Take the same `train.py` + `model.pkl` from Project 2.5 and deploy it four
 ways via SageMaker, feeling the differences in cost, latency, and operational
 model. Produce one live, invokable endpoint per mode (modes can be stood up,
 tested, and torn down independently). The point of this project is to
 internalize what SageMaker *takes away* (the whole hand-built serving stack
 from Project 2.5) and what it *introduces* (packaging conventions, execution
-roles, three distinct billing models).
+roles, four distinct billing models).
 
-## Architecture — three deployment modes
+## Architecture — four deployment modes
 
 ### Real-time endpoint
 
@@ -46,6 +48,22 @@ Client (boto3 / SageMaker SDK)
        │ idle = $0, warm invokes = ~10-50ms
        ▼
    inference.py → model.predict() → response
+```
+
+### Asynchronous inference
+
+```
+Client (boto3)                              result delivered via S3 (not inline)
+       │                                              ▲
+       │ 1. upload request to S3                      │ 4. poll S3 / SNS notify
+       │ 2. invoke_endpoint_async(InputLocation=...)  │
+       ▼                                              │
+   SageMaker Async Endpoint  (dedicated instances + internal request QUEUE)
+       │                                              │
+       │ same container, same model.tar.gz           │ 3. write result object
+       │ large payloads (≤1 GB), long inference (≤~60 min)
+       ▼                                              │
+   inference.py → model.predict() ──────────────────►┘  s3://.../iris-async/output/<uuid>.out
 ```
 
 ### Batch Transform
@@ -77,7 +95,8 @@ Output JSON in S3  (s3://my-bucket/batch-output/predictions.json)
   HTTPS. No ACM, no Route 53, no cert management of any kind in this project.
 - **Pricing shifts from "hours running" to "mode-specific":** real-time
   endpoints bill like EC2 but with a managed-service premium; serverless is
-  per-invocation; batch is per-job-duration.
+  per-invocation; async bills like real-time (dedicated instances) but can
+  autoscale to zero on queue depth; batch is per-job-duration.
 
 ## The one thing that makes this project work
 
@@ -94,8 +113,8 @@ SageMaker's **packaging convention**:
   mounts the tarball, imports `inference.py`, and routes HTTPS requests to
   the handler chain.
 
-Everything downstream (endpoints, serverless, batch) consumes this same
-`model.tar.gz` + `inference.py` artifact. Build it once, deploy three ways.
+Everything downstream (real-time, serverless, async, batch) consumes this same
+`model.tar.gz` + `inference.py` artifact. Build it once, deploy four ways.
 
 ## Prerequisites
 
@@ -123,9 +142,10 @@ Everything downstream (endpoints, serverless, batch) consumes this same
 | C | Create SageMaker execution role with S3 read + CloudWatch write permissions | IAM |
 | D | Deploy a real-time endpoint: Model → EndpointConfig → Endpoint | SageMaker SDK |
 | E | Invoke the real-time endpoint via SageMaker SDK, boto3, and AWS CLI | Local |
-| F | Deploy a serverless-inference variant from the same model artifact | SageMaker SDK |
-| G | Run a batch transform job against a CSV in S3 | SageMaker SDK |
-| H | Teardown each mode; review billed cost by mode | AWS Console |
+| F | Deploy + invoke a serverless-inference variant from the same model artifact | SageMaker SDK |
+| G | Deploy + invoke an async-inference variant (S3 input/output, queue-backed) | SageMaker SDK |
+| H | Run a batch transform job against a JSONL file in S3 | SageMaker SDK |
+| I | Teardown each mode; review billed cost by mode | AWS Console |
 
 ## What I'm learning here
 
@@ -138,14 +158,18 @@ Everything downstream (endpoints, serverless, batch) consumes this same
 - IAM execution roles — scoped permissions for AWS services (not users),
   trust policies, SageMaker as a principal
 - S3 as the artifact store (first encounter in this learning path)
-- Cost comparison across the three modes for the same workload
+- Cost comparison across the four modes for the same workload
+- How async decouples request from result via S3 (submit → poll/SNS), and
+  how that differs from the two synchronous endpoints and from batch
 - When managed inference is the right call vs rolling your own fleet
 
 ## Interview talking points this project earns me
 
 - "When would you use SageMaker over EC2 + ALB + ASG?" — trade-off framing
-- The three deployment modes and when each fits (interactive user traffic
-  vs spiky batch vs offline scoring)
+- The four deployment modes and when each fits (interactive user traffic vs
+  spiky traffic vs large-payload/long-running single requests vs offline scoring)
+- Why async and batch both decouple via S3, yet async keeps a persistent
+  endpoint for one-at-a-time requests while batch is a fire-and-forget job
 - Cold-start behavior of SageMaker Serverless and how it compares to Lambda
 - Why `inference.py` has four separate handlers (separation of concerns:
   parse / load / predict / serialize)
@@ -156,17 +180,18 @@ Everything downstream (endpoints, serverless, batch) consumes this same
   equivalent self-managed `m5.large` EC2 at ~$0.096/hour — the ~20%
   premium for SageMaker's managed layer
 
-## Files (as they get written)
+## Files
 
 - `train.py` — unchanged from Project 2.5 (produces `model.pkl`)
 - `inference.py` — the four SageMaker handler functions
+- `test_inference_local.py` — local sanity check of the handlers before deploy
 - `package_model.sh` — tar `model.pkl` + `inference.py` into `model.tar.gz`
-- `deploy_realtime.py` — SageMaker SDK script to deploy the real-time endpoint
-- `deploy_serverless.py` — same model, serverless configuration
+- `deploy_realtime.py` / `invoke_endpoint.py` / `teardown_realtime.py` — real-time mode
+- `deploy_serverless.py` / `invoke_serverless.py` / `teardown_serverless.py` — serverless mode
+- `deploy_async.py` / `invoke_async.py` / `teardown_async.py` — async mode (S3 I/O, queue-backed)
 - `batch_transform.py` — one-off batch job driver
-- `invoke_endpoint.py` — test invocations via SDK, boto3, and CLI examples
-- `batch_input.csv` — sample feature rows for batch transform
-- `model.tar.gz` — gitignored (build artifact)
+- `batch_input.jsonl` — sample feature rows for batch transform
+- `model.tar.gz` — build artifact (`model.pkl` + `code/inference.py`); not tracked
 
 ## Not in this project
 

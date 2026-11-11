@@ -5,4 +5,6 @@ venv/
 *.pem
 .DS_Store
 projects/*/model.pkl
-projects\project-3-sagemaker\model.tar.gz
+projects/project-3-sagemaker/model.tar.gz
+projects/project-4-lambda-ecr/.dockerignore
+projects/project-4-lambda-ecr/docker-sandbox
